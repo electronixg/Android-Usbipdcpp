@@ -126,6 +126,16 @@ class UsbService : Service() {
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
             device?.let { usbDevice ->
+                Log.e(
+                    TAG,
+                    "USB DETACH BROADCAST: " +
+                        "name=${usbDevice.deviceName}, " +
+                        "vid=${String.format("%04X", usbDevice.vendorId)}, " +
+                        "pid=${String.format("%04X", usbDevice.productId)}, " +
+                        "deviceId=${usbDevice.deviceId}, " +
+                        "interfaces=${usbDevice.interfaceCount}, " +
+                        "bound=${activeDevices.containsKey(usbDevice.deviceName)}"
+                )
                 // onReceive 在主线程，设备清理要切到 native 线程；起协程而非
                 // runBlocking，避免阻塞主线程
                 serviceScope.launch { handleDeviceDetached(usbDevice) }
