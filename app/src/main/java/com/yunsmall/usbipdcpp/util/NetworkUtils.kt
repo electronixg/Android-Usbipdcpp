@@ -5,31 +5,31 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Locale
 
-// 沿用拆分前的 "MainActivity" 标签：logcat 过滤习惯不受文件拆分影响
+// Keep the pre-split "MainActivity" tag so splitting files does not affect familiar logcat filters.
 private const val TAG = "MainActivity"
 
-// 获取设备IP地址
+// Get the device IP address.
 fun getDeviceIpAddress(): String? {
     try {
-        // getNetworkInterfaces 文档允许返回 null（无网络接口）：结果同样是
-        // 拿不到地址，直接短路，免得 NPE 走 catch 打印误导性的错误日志
+        // getNetworkInterfaces documentation permits null (no network interfaces): no address is available in this case either,
+        // so short-circuit directly instead of causing an NPE and misleading error logging in catch.
         val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
-        // Wi-Fi/热点类接口的地址才是 PC 侧能连到的；蜂窝（rmnet/wwan）的地址是
-        // 运营商内网，双网并存时枚举顺序不保证 Wi-Fi 在前，故先扫一遍优先命中；
-        // 都没有才退回第一个可用 IPv4（只有蜂窝时显示总比 null 强）
+        // Wi-Fi/hotspot interface addresses are reachable from the PC; cellular (rmnet/wwan) addresses belong to the
+        // carrier's internal network. When both exist, enumeration does not guarantee Wi-Fi comes first, so scan once to prioritize it;
+        // only fall back to the first available IPv4 if neither exists (for cellular-only connections, showing it is better than null).
         var fallback: String? = null
         while (interfaces.hasMoreElements()) {
             val networkInterface = interfaces.nextElement()
-            // 跳过回环接口和未启用的接口
+            // Skip loopback and inactive interfaces.
             if (networkInterface.isLoopback || !networkInterface.isUp) continue
-            // 跳过 VPN/虚拟网卡（tun/ppp 前缀），避免返回虚拟接口地址
-            // 接口名是 ASCII，大小写转换用 ROOT：随系统 locale（如土耳其语
-            // 的 i/I 规则）转换会得出意料之外的名字
+            // Skip VPN/virtual adapters (tun/ppp prefixes) to avoid returning a virtual interface address.
+            // Interface names are ASCII; use ROOT for case conversion: using the system locale (such as Turkish
+            // i/I rules) would produce unexpected names.
             val ifName = networkInterface.name?.lowercase(Locale.ROOT) ?: ""
             if (ifName.startsWith("tun") || ifName.startsWith("ppp") || ifName.startsWith("vpn")) continue
 
             val ipv4 = firstIpv4Address(networkInterface) ?: continue
-            // ap 前缀是热点接口（如 ap0），swlan 是部分 ROM 的命名
+            // The ap prefix indicates hotspot interfaces (such as ap0); swlan is used by some ROMs.
             if (ifName.startsWith("wlan") || ifName.startsWith("ap") || ifName.startsWith("swlan")) {
                 return ipv4
             }
@@ -44,7 +44,7 @@ fun getDeviceIpAddress(): String? {
     return null
 }
 
-// 取接口的第一个非回环 IPv4 地址；无则返回 null
+// Get the interface's first non-loopback IPv4 address; return null if none exists.
 private fun firstIpv4Address(networkInterface: NetworkInterface): String? {
     val addresses = networkInterface.inetAddresses
     while (addresses.hasMoreElements()) {

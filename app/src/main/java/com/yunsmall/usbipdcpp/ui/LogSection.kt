@@ -19,8 +19,8 @@ import androidx.compose.ui.unit.dp
 import com.yunsmall.usbipdcpp.R
 import kotlinx.coroutines.flow.first
 
-// 日志自动跟随的"贴底"宽容度（dp）：用户拖拽停止后与底部的距离在此之内
-// 仍视为贴底、继续跟随最新；用 dp 是因为行高随系统字体缩放
+// Bottom-following tolerance (dp) for automatic log scrolling: after a user finishes dragging, a distance from the bottom within this value
+// still counts as at the bottom and keeps following the latest logs; use dp because line height varies with system font scaling.
 private const val AUTO_SCROLL_SLACK_DP = 72
 
 @Composable
@@ -67,10 +67,10 @@ fun ColumnScope.LogSection(
                     )
                     .padding(8.dp)
             ) {
-                // rememberScrollState 放条件外：分支里的 remember 会在分支切换
-                //（清空日志↔重新产生）时被丢弃重建
+                // Keep rememberScrollState outside the condition: remember inside a branch is discarded and recreated when switching branches
+                //(clearing logs <-> generating new logs).
                 val scrollState = rememberScrollState()
-                // 贴底宽容度换算成像素：dp 随系统字体缩放，任何字号下都留足行高余量
+                // Convert the bottom tolerance to pixels: dp follows system font scaling, leaving enough line-height margin at any font size.
                 val slackPx = with(LocalDensity.current) { AUTO_SCROLL_SLACK_DP.dp.roundToPx() }
 
                 if (logMessages.isEmpty()) {
@@ -83,9 +83,9 @@ fun ColumnScope.LogSection(
                     AutoScrollEffect(scrollState, logVersion, slackPx)
 
                     Text(
-                        // 拼接只在日志内容变化时发生（参数不变时重组被 Compose 跳过，
-                        // 滚动不触发重组），500 条上限下开销微秒级；加缓存或换
-                        // LazyColumn 的复杂度换不来收益
+                        // Join only when log content changes (Compose skips recomposition if parameters are unchanged,
+                        // and scrolling does not trigger recomposition). With a 500-entry cap, overhead is microseconds; adding a cache or switching to
+                        // LazyColumn adds complexity without benefit.
                         text = logMessages.joinToString("\n"),
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier
@@ -132,25 +132,25 @@ fun FullLogDialog(logMessages: List<String>, logVersion: Long, onDismiss: () -> 
     )
 }
 
-// 自动滚动的共用 effect（LogSection 与 FullLogDialog）：是否跟随是显式状态，
-// 只有用户的拖拽能改变；slackPx 由调用方按自身 LocalDensity 计算传入
+// Shared auto-scroll effect (LogSection and FullLogDialog): following is explicit state,
+// changed only by user dragging; the caller calculates slackPx using its own LocalDensity.
 @Composable
 private fun AutoScrollEffect(scrollState: ScrollState, logVersion: Long, slackPx: Int) {
-    // 贴底跟随开关，默认开。判定不能用"读 value 与 maxValue 的瞬时差"来做：
-    // 内容单次增长超过 slack（日志突发、单条折行多行）会一次把底部推远，
-    // 瞬时判定会把内容增长误认成"用户上翻了"，跟随会就此永久停住
+    // Bottom-following switch, enabled by default. Do not decide by reading the instantaneous difference between value and maxValue:
+    // one content increase exceeding slack (log burst or one entry wrapping across many lines) can push the bottom far away at once,
+    // and an instantaneous check would mistake content growth for the user scrolling upward, permanently stopping following.
     var followLatest by rememberSaveable { mutableStateOf(true) }
 
-    // 开关的唯一改变点：用户拖拽停止后按最终位置决定。等惯性滑动也停下再
-    // 判定；程序性滚动（下面的 scrollTo）不产生 DragInteraction，不会误改状态。
-    // saveable 让旋转重建后维持上翻用户不被拉底
+    // The only place changing the switch: decide from the final position after user dragging stops. Wait until inertial scrolling also stops
+    // before deciding; programmatic scrolling (scrollTo below) produces no DragInteraction and cannot incorrectly change state.
+    // saveable preserves the choice across rotation/recreation so users who scrolled up are not pulled to the bottom.
     LaunchedEffect(scrollState, slackPx) {
         scrollState.interactionSource.interactions.collect { interaction ->
             if (interaction is DragInteraction.Stop) {
                 snapshotFlow { scrollState.isScrollInProgress }.first { !it }
                 followLatest = scrollState.value >= scrollState.maxValue - slackPx
-                // 拖拽期间到达的日志在下面的 effect 里被跳过（不抢拖拽），
-                // 这里按判定补一次，避免要等下一条日志才归位
+                // Logs arriving during dragging are skipped by the effect below (do not compete with dragging);
+                // perform one catch-up here according to the decision, rather than waiting for the next log to restore the position.
                 if (followLatest) {
                     scrollState.scrollTo(scrollState.maxValue)
                 }
@@ -160,14 +160,14 @@ private fun AutoScrollEffect(scrollState: ScrollState, logVersion: Long, slackPx
 
     LaunchedEffect(logVersion, slackPx, followLatest) {
         if (!followLatest) return@LaunchedEffect
-        // 拖拽/惯性滑动进行中不抢位置：停下后由上方的判定归位
+        // Do not compete for position during dragging/inertial scrolling; the decision above restores it after stopping.
         if (scrollState.isScrollInProgress) return@LaunchedEffect
-        // 新文本的测量/布局晚于本 effect 启动：等一帧让滚动目标尽量准确。
-        // 即使这次读到旧布局的 maxValue，下一条日志的 effect 会继续滚到底，
-        // 不像"位置判定"方案那样把滞后积累成停摆
+        // New text measurement/layout occurs after this effect starts; wait one frame to make the scroll target as accurate as possible.
+        // Even if maxValue is read from the old layout this time, the next log's effect continues scrolling to the bottom,
+        // instead of accumulating lag into a permanent stop as a position-checking scheme would.
         withFrameNanos { }
-        // 用立即滚动而不是动画：新日志会不断重启本 effect 取消动画，
-        // 洪水下位置逐次落后于追加速度，跟随会肉眼可见地停住
+        // Scroll immediately rather than animate: new logs keep restarting this effect and cancelling the animation;
+        // under a flood, the position increasingly lags behind appends, and following visibly stops.
         scrollState.scrollTo(scrollState.maxValue)
     }
 }

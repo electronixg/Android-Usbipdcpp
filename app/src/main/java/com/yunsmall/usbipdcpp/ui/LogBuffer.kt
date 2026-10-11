@@ -5,24 +5,24 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
-// 日志区只保留最近若干条：debug 级日志量大且服务长期运行，不设上限的话
-// 每次追加的列表复制和展示时的整段拼接会越来越重
+// Keep only the latest log entries: debug logs are numerous and the service runs for long periods; without a limit,
+// list copying on each append and joining the entire text for display become increasingly expensive.
 private const val MAX_LOG_LINES = 500
 
 /**
- * UI 日志缓冲：消息列表与自动滚动的版本号必须同步推进（列表封顶后 size
- * 恒定、同秒重复消息的内容也可能完全相等，滚动 effect 只能靠版本号触发），
- * 两个状态收在一起由 append 单点维护。用 SnapshotStateList：追加/裁剪走
- * 元素级通知，读取方（LogSection 的拼接）按元素读取订阅重组，不依赖
- * 每次全量复制列表来触发更新
+ * UI log buffer: the message list and auto-scroll version must advance together (size becomes
+ * constant once capped, and repeated messages within the same second can have identical content, so only the version can trigger the scroll effect).
+ * Keep both states together, maintained solely by append. Use SnapshotStateList: appending/trimming sends
+ * element-level notifications; readers (LogSection's joining) subscribe to recomposition through element reads, without relying on
+ * copying the entire list on each update to trigger changes.
  */
 class LogBuffer {
     private val _messages = mutableStateListOf<String>()
 
-    // 只读视图：读取方按元素读取订阅重组，不需要也不应改写
+    // Read-only view: readers subscribe to recomposition through element reads; they neither need nor should modify it.
     val messages: List<String> = _messages
 
-    // 单调递增：列表每次变化（追加、清空）都推进——滚动 effect 以它为准
+    // Monotonically increasing: advance on every list change (append or clear); the scroll effect uses this as its reference.
     var version by mutableStateOf(0L)
         private set
 

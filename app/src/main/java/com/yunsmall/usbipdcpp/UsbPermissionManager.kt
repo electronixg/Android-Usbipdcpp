@@ -13,10 +13,10 @@ import android.os.SystemClock
 import android.util.Log
 
 /**
- * USB 权限受理与设备列表变化的统一入口。
- * permissionIntent 用 lazy：PendingIntent.getBroadcast 会创建系统对象，只有
- * 真正发起权限请求才需要；本类存在"被构造但从未发起过请求"的路径
- *（onDestroy 里的兜底 unregister），构造期不做这类副作用
+ * Unified entry point for USB permission requests and device-list changes.
+ * permissionIntent is lazy: PendingIntent.getBroadcast creates a system object, needed only when
+ * actually requesting permission. This class has a path where it is constructed but never requests permission
+ *(the fallback unregister in onDestroy); avoid these side effects during construction.
  */
 class UsbPermissionManager(
     private val context: Context,
@@ -25,11 +25,11 @@ class UsbPermissionManager(
     companion object {
         private const val TAG = "UsbPermissionManager"
         const val ACTION_USB_PERMISSION = "com.yunsmall.usbipdcpp.USB_PERMISSION"
-        // PendingIntent 的 requestCode 是系统匹配键的一部分：用项目内唯一值，
-        // 避免将来新增的 broadcast PendingIntent（默认 requestCode 也是 0）被合并
+        // PendingIntent's requestCode is part of the system matching key: use a project-unique value
+        // to prevent merging with future broadcast PendingIntents (whose default requestCode is also 0).
         private const val PERMISSION_REQUEST_CODE = 1001
-        // 待处理登记的陈旧窗口：结果若被系统吞掉永不投递，超时后允许对该设备
-        // 重新发起；与相机权限的陈旧判定阈值对齐
+        // Stale window for pending entries: if the system swallows a result and never delivers it, allow a new request for this device
+        // after timeout; align with the camera-permission stale threshold.
         private const val PERMISSION_PENDING_TIMEOUT_MS = 60_000L
     }
 
@@ -43,18 +43,18 @@ class UsbPermissionManager(
         PendingIntent.getBroadcast(context, PERMISSION_REQUEST_CODE, intent, flags)
     }
 
-    // 统一锁对象：onReceive 与 requestPermission 各自 synchronized(this) 时
-    // this 指向不同对象（Receiver 实例 vs Manager 实例），互斥完全不生效
+    // Shared lock object: if onReceive and requestPermission each use synchronized(this),
+    // this refers to different objects (Receiver vs Manager instances), providing no mutual exclusion at all.
     private val lock = Any()
-    // 已受理、等待系统结果的设备名 → 受理时刻（elapsedRealtime），
-    // 结果到达或拔出时移除。只存设备名不存回调：USB 权限对话框打开期间
-    // Activity 可能重建，回调随旧组合作废；结果改由 onPermissionResult 交给
-    // 重建后的新监听器。记时刻用于陈旧判定：结果若被系统吞掉永不投递，
-    // 条目会永久挡住该设备（原理同相机权限的 CAMERA_PENDING_TIMEOUT_MS）
+    // Accepted device names awaiting system results -> acceptance time (elapsedRealtime),
+    // removed on result arrival or detach. Store only device names, not callbacks: the Activity may be recreated while
+    // the USB permission dialog is open, invalidating callbacks with the old composition; onPermissionResult instead delivers
+    // results to the new listener after recreation. Record time for stale detection: if the system swallows a result and never delivers it,
+    // the entry would permanently block this device (same principle as CAMERA_PENDING_TIMEOUT_MS for camera permission).
     private val pendingDevices = mutableMapOf<String, Long>()
-    // 监听器只在主线程读写（组合与广播 onReceive 都在主线程），无需加锁
+    // Listeners are read/written only on the main thread (composition and broadcast onReceive both run there); no locking needed.
     private var onDeviceListChanged: (() -> Unit)? = null
-    // 权限结果的唯一出口，详见 setOnPermissionResultListener
+    // Sole exit for permission results; see setOnPermissionResultListener.
     private var onPermissionResult: ((UsbDevice, Boolean) -> Unit)? = null
 
     fun setOnDeviceListChangedListener(listener: (() -> Unit)?) {
@@ -62,20 +62,20 @@ class UsbPermissionManager(
     }
 
     /**
-     * 权限结果统一从"当前监听器"交付，而不是按请求登记回调：对话框打开期间
-     * Activity 可能重建，登记在旧实例上的回调无人认领（结果广播会由新实例的
-     * 接收器收到），只有交付给当前存活的 UI 才能把绑定流程接上。
-     * 已有权限的即时结果同样走此出口，调用方不必区分快慢两条路径。
-     * 监听器在"已有权限"路径上是同步调用：实现必须立即返回，不得在此回调中
-     * 重入 requestPermission（会形成同栈递归）
+     * Deliver all permission results through the current listener rather than registering callbacks per request: the Activity may be recreated
+     * while the dialog is open, leaving callbacks registered on the old instance unclaimed (the new instance's receiver
+     * receives the result broadcast). Only delivering to the currently surviving UI can continue the binding flow.
+     * Immediate results for existing permission also use this exit; callers need not distinguish fast and slow paths.
+     * The listener is called synchronously on the existing-permission path: implementations must return immediately and must not
+     * reenter requestPermission in this callback (which would cause recursion on the same stack).
      */
     fun setOnPermissionResultListener(listener: ((UsbDevice, Boolean) -> Unit)?) {
         onPermissionResult = listener
     }
 
-    // 权限结果的唯一投递点：监听器实现来自组合层，而两条投递路径的调用栈
-    // 都在边界上——onReceive 是系统回调，已有权限的同步交付在 Compose 事件
-    // 栈，监听器的异常穿过任一边界都会崩掉进程，在此兜住并记录
+    // Sole delivery point for permission results: listener implementations come from the composition layer, and both delivery paths' stacks
+    // are at boundaries: onReceive is a system callback, while synchronous delivery for existing permission occurs on the Compose event
+    // stack. A listener exception crossing either boundary would crash the process; catch and log it here.
     private fun deliverResult(device: UsbDevice, granted: Boolean) {
         try {
             onPermissionResult?.invoke(device, granted)
@@ -97,23 +97,23 @@ class UsbPermissionManager(
 
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
 
-                    // 系统权限结果必带 EXTRA_DEVICE；缺失属非常规实现，忽略即可——
-                    // 该设备名的 pending 登记由超时窗口放行重试
+                    // System permission results always carry EXTRA_DEVICE; a missing extra indicates an unusual implementation and can be ignored;
+                    // the timeout window allows retry of the pending entry for that device name.
                     device?.let { usbDevice ->
                         Log.d(TAG, "USB permission result for ${usbDevice.deviceName}: $granted")
-                        // 锁内只改登记表，锁外交付结果：监听器可能再次发起权限
-                        // 请求，锁内同步执行用户代码（锁不可重入）有死锁风险
+                        // Only modify the registry under the lock; deliver results outside it: the listener may initiate another permission
+                        // request, and synchronously executing user code under the non-reentrant lock risks deadlock.
                         synchronized(lock) {
                             pendingDevices.remove(usbDevice.deviceName)
                         }
-                        // 无条件交付：请求可能跨 Activity 重建（对话框期间旋转），
-                        // 新实例的登记表是空的，不能以"有登记"为交付前提；设备
-                        // 是否仍在由监听器侧核实。无监听器（UI 恰在重建间隙）时
-                        // 结果丢弃，用户重新点击即可。
-                        // 已知代价：超时接管后旧对话框若其实没死，新旧两个结果
-                        // 都会交付（第二次以 DeviceInUse 被拒）——能区分新旧请求
-                        // 的方案（如请求令牌）都要求新实例识别旧请求，令牌却随旧
-                        // 实例销毁，与跨重建交付冲突，取交付优先
+                        // Deliver unconditionally: a request can span Activity recreation (rotation while the dialog is open);
+                        // the new instance's registry is empty, so registration cannot be a prerequisite for delivery. The listener checks
+                        // whether the device is still present. If no listener exists (the UI is between instances during recreation),
+                        // discard the result; the user can tap again.
+                        // Known cost: if the old dialog is actually still alive after timeout takeover, both old and new results
+                        // are delivered (the second is rejected as DeviceInUse). Schemes distinguishing old and new requests
+                        // (such as request tokens) require the new instance to recognize old requests, but tokens disappear with the old
+                        // instance, conflicting with delivery across recreation; prioritize delivery.
                         deliverResult(usbDevice, granted)
                     }
                 }
@@ -130,14 +130,14 @@ class UsbPermissionManager(
                     }
                     device?.let { usbDevice ->
                         Log.d(TAG, "USB device detached: ${usbDevice.deviceName}")
-                        // 拔出后权限结果广播不会返回，清掉对应登记，
-                        // 否则条目残留会让该设备名后续无法再发起权限请求
+                        // After detach, no permission-result broadcast returns; clear the corresponding entry,
+                        // otherwise the leftover entry would prevent future permission requests for that device name.
                         synchronized(lock) {
                             pendingDevices.remove(usbDevice.deviceName)
                         }
                     }
-                    // 设备物理拔出，设备列表必须刷新（解绑清理由 UsbService 自己的
-                    // 接收器负责，与本管理器无关）
+                    // The device was physically detached; refresh the device list (UsbService's own receiver handles unbinding
+                    // cleanup, independently of this manager).
                     onDeviceListChanged?.invoke()
                 }
             }
@@ -152,9 +152,9 @@ class UsbPermissionManager(
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // RECEIVER_NOT_EXPORTED 只拦"其他应用"发来的广播：系统（system uid）
-            // 的插拔广播不受影响，权限结果广播经 PendingIntent 以本应用身份投递
-            //（AMS 对同 uid 放行），两条来源都照收；显式导出反而给伪造广播留口
+            // RECEIVER_NOT_EXPORTED blocks only broadcasts from other applications: the system's (system uid)
+            // attach/detach broadcasts are unaffected, and permission-result broadcasts arrive through PendingIntent as this application
+            //(AMS permits the same uid). Accept both sources; explicitly exporting would instead allow forged broadcasts.
             context.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             context.registerReceiver(usbReceiver, filter)
@@ -170,15 +170,15 @@ class UsbPermissionManager(
     }
 
     fun getDeviceList(): Map<String, UsbDevice> {
-        // hub 对 USB/IP 导出无意义（导出的是拓扑节点而非功能设备）。
-        // 上游 AOSP 已在 UsbHostManager 里把 hub 从 UsbManager 剔除，这里再滤一道：
-        // 定制 ROM 可能改掉该行为，界面不该出现这种设备
+        // Exporting hubs through USB/IP is meaningless (they are topology nodes rather than functional devices).
+        // Upstream AOSP already excludes hubs from UsbManager in UsbHostManager; filter again here because
+        // custom ROMs may change that behavior, and these devices should not appear in the UI.
         return usbManager.deviceList.filterValues { !isHubDevice(it) }
     }
 
-    // 对齐 AOSP UsbHostManager 的 hub 判定：设备描述符声明了 hub 类的直接算；
-    // 描述符没给类（bDeviceClass=0）的从接口取，全部接口都是 hub 类才算，
-    // 避免误伤带 hub 的复合设备
+    // Match AOSP UsbHostManager's hub detection: a device descriptor declaring the hub class counts directly;
+    // if the descriptor gives no class (bDeviceClass=0), check interfaces; only count it if all interfaces are hub class,
+    // avoiding false positives for composite devices containing a hub.
     private fun isHubDevice(device: UsbDevice): Boolean {
         if (device.deviceClass == UsbConstants.USB_CLASS_HUB) return true
         if (device.deviceClass != 0 || device.interfaceCount == 0) return false
@@ -192,14 +192,14 @@ class UsbPermissionManager(
     }
 
     /**
-     * @return true 表示请求已受理，结果经 [setOnPermissionResultListener] 交付
-     *         （已有权限时同步交付）；false 表示同设备最近一次请求仍在途、本次未受理
+     * @return true means the request was accepted; results are delivered through [setOnPermissionResultListener]
+     *                 (synchronously if permission already exists); false means the same device's latest request is still in flight and this one was not accepted.
      */
     fun requestPermission(device: UsbDevice): Boolean {
         if (usbManager.hasPermission(device)) {
-            // 已有权限：同步交付，调用方不必感知快慢两条路径。监听器为 null
-            //（UI 恰在重建间隙）时交付被丢弃——调用方都在组合内调用本方法，
-            // 监听器必然已装；保留一行日志便于异常时序下排查
+            // Existing permission: deliver synchronously; callers need not distinguish fast and slow paths. A null listener
+            //(the UI is between instances during recreation) discards delivery; callers all invoke this method within composition,
+            // so the listener should already be installed. Keep one log line to diagnose unusual timing.
             if (onPermissionResult != null) {
                 deliverResult(device, true)
             } else {
@@ -208,11 +208,11 @@ class UsbPermissionManager(
             return true
         }
 
-        // 锁内只登记设备名与受理时刻，锁外发起系统请求：避免持锁调用外部代码。
-        // 同一设备最近一次请求仍在途时拒绝新的：对同一设备的重复系统请求行为
-        // 不定（可能重复弹窗），受理方也会失去"已有一次在途"这个提示依据；
-        // 超过陈旧窗口视为结果已被系统吞掉（不投递广播），覆盖登记重新发起，
-        // 否则该设备名会被永久挡住，只有 Activity 重建才能恢复
+        // Register only the device name and acceptance time under the lock; initiate the system request outside it to avoid calling external code while locked.
+        // Reject a new request when this device's latest request is still in flight: repeated system requests for the same device have
+        // undefined behavior (possibly duplicate dialogs), and the accepting side would lose the basis for reporting an existing in-flight request;
+        // after the stale window, treat the result as swallowed by the system (no broadcast delivered), overwrite the entry and request again,
+        // otherwise this device name would stay blocked forever until Activity recreation.
         synchronized(lock) {
             val now = SystemClock.elapsedRealtime()
             val submittedAt = pendingDevices[device.deviceName]
@@ -220,15 +220,15 @@ class UsbPermissionManager(
                 return false
             }
             if (submittedAt != null) {
-                // 能到这里说明登记已超时：记一行便于排查"为何用户看到两个
-                // 权限弹窗/结果错位"——前一次请求被判定为结果已丢失并接管
+                // Reaching here means the entry timed out: log once to diagnose why the user sees two
+                // permission dialogs/mismatched results; the previous request's result was deemed lost and taken over.
                 Log.w(TAG, "Stale permission request taken over: ${device.deviceName}")
             }
             pendingDevices[device.deviceName] = now
         }
-        // 抛异常时撤掉登记再重抛：AOSP 的系统服务异常会连带崩溃进程（残留状态
-        // 没有存活的载体），但定制 ROM 可能抛而不崩（如 SecurityException），
-        // 残留会让该设备名从此无法再发起请求
+        // On exception, remove the entry before rethrowing: AOSP system-service exceptions also crash the process (no surviving object
+        // holds stale state), but a custom ROM might throw without crashing (such as SecurityException),
+        // and a leftover entry would prevent any future request for that device name.
         try {
             usbManager.requestPermission(device, permissionIntent)
         } catch (t: Throwable) {

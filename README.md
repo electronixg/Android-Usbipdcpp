@@ -1,7 +1,5 @@
 # Android-Usbipdcpp
 
-[中文](README.zh.md)
-
 📱🔌 An Android USB/IP server application for sharing USB devices over the network, based on [usbipdcpp](https://github.com/yunsmall/usbipdcpp), a dedicated library for developing USB/IP servers.
 
 ## ✨ Features
@@ -9,7 +7,7 @@
 - 🔗 Share USB devices from Android to remote computers
 - 📦 Multiple device support
 - ⚙️ Configurable server port
-- 🌐 Chinese/English UI
+- 🌐 English UI
 - 📋 Real-time log viewer
 
 ## 📋 Requirements

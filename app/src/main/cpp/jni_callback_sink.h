@@ -5,16 +5,16 @@
 #include <mutex>
 #include <string>
 
-// 自定义sink，通过JNI回调把日志传到Kotlin
+// Custom sink forwarding logs to Kotlin through JNI callbacks
 template<typename Mutex>
 class jni_callback_sink : public spdlog::sinks::base_sink<Mutex> {
 public:
-    // 函数指针而非 std::function：sink_it_ 是每条日志的热路径，类型层面排除
-    // 捕获 lambda（会引入堆分配）的可能；将来若要传捕获 lambda，先想清楚
-    // 热路径上的分配代价再改这里。
-    // 约定：传入的必须是经全局查表的转发函数（当前是 jni_log::log_callback），
-    // 不能在构造时绑定到某个具体回调——回调替换（setLogCallback）不重建已有的
-    // sink，日志永远送到"当前"回调正依赖这一层间接
+    // Use a function pointer rather than std::function: sink_it_ is the hot path for every log, excluding
+    // capturing lambdas (which introduce heap allocation) at the type level. Before supporting capturing lambdas in the future, consider
+    // the allocation cost on this hot path before changing this.
+    // Contract: the argument must be a forwarding function using global lookup (currently jni_log::log_callback),
+    // and must not bind a specific callback at construction: replacing the callback (setLogCallback) does not recreate existing
+    // sinks; always delivering logs to the current callback relies on this indirection.
     using callback_fn = void (*)(spdlog::level::level_enum, const std::string&);
 
     explicit jni_callback_sink(callback_fn callback) : callback_(std::move(callback)) {}
@@ -23,10 +23,10 @@ protected:
     void sink_it_(const spdlog::details::log_msg& msg) override {
         if (!callback_) return;
 
-        // 格式化与 std::string 构造都可能 bad_alloc，callback_ 内部也可能抛；
-        // 上游有在 JNI 方法 try 之外直接 spdlog::info 的调用点（如服务器启动
-        // 日志），异常逃到那里会穿越 extern "C" 边界直接 terminate。失败只丢
-        // 这一条日志，不能升级成进程必死
+        // Formatting and std::string construction may throw bad_alloc, and callback_ may also throw internally;
+        // upstream has call sites invoking spdlog::info outside JNI methods' try blocks (such as server startup
+        // logs). An exception escaping there would cross the extern "C" boundary and immediately terminate. On failure, drop only
+        // this log; it must not escalate to certain process termination.
         try {
             spdlog::memory_buf_t formatted;
             this->formatter_->format(msg, formatted);
@@ -34,7 +34,7 @@ protected:
 
             callback_(msg.level, log_str);
         } catch (...) {
-            // 此处不能再走日志（重入本 sink），丢弃即可
+            // Do not log here (that would reenter this sink); simply discard.
         }
     }
 

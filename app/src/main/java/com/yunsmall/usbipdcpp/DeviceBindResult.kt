@@ -3,11 +3,11 @@ package com.yunsmall.usbipdcpp
 import android.content.Context
 
 /**
- * 设备操作结果
+ * Device operation result
  */
 sealed class DeviceBindResult {
-    // 绑定成功必须携带 busid（解绑与界面展示都要用）；解绑成功无负载，
-    // 在 DeviceUnbindResult 里是 object——两边形态不同是有意的
+    // Successful binding must carry busid (needed for both unbinding and UI display); successful unbinding has no payload,
+    // and is an object in DeviceUnbindResult. The differing forms are intentional.
     data class Success(val busid: String) : DeviceBindResult()
 
     sealed class Failure : DeviceBindResult() {

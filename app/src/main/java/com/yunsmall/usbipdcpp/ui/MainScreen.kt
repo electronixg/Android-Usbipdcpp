@@ -566,13 +566,6 @@ private fun MainTopBar(onAboutClick: () -> Unit) {
                             showLanguageMenu = false
                         }
                     )
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.language_zh)) },
-                        onClick = {
-                            setLanguage("zh")
-                            showLanguageMenu = false
-                        }
-                    )
                 }
             }
         }

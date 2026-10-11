@@ -10,20 +10,20 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
-// 本文件三条纪律（细节与理由见各处注释）：
-// 1. 所有 JNI 调用经 jniContext：native 侧串行 + 不可取消
-// 2. 库加载守卫（libraryLoaded）只收在公开方法里，*Impl 不自行判断
-// 3. 公开 suspend 方法自己切到 jniContext，调用方不必记得切
+// Three rules for this file (details and reasons appear in the relevant comments):
+// 1. All JNI calls use jniContext: native calls are serialized and non-cancellable.
+// 2. Library-loading guards (libraryLoaded) belong only in public methods; *Impl methods do not check independently.
+// 3. Public suspend methods switch to jniContext themselves; callers need not remember to switch.
 object UsbIpNative {
     private const val TAG = "UsbIpNative"
 
-    // 加载放在类初始化里：访问本对象任意成员都会先触发这里，从而保证任何 JNI
-    // 调用都在库加载之后——UI 首次组合里的 setLogCallback 早于 Service.onCreate
-    // 执行时（冷启动竞态）也不会抛 UnsatisfiedLinkError。
-    // 首次触达点（Service 构造、组合期 setLogCallback 等）都在主线程：加载是
-    // dlopen 级别的毫秒级操作，对启动预算无实质影响，不做后台预热
-    // 异常必须就地捕获：逃出类初始化会让 JVM 把这个类标记为初始化失败，之后
-    // 每次访问都抛 NoClassDefFoundError，外层的 try-catch 也救不回来
+    // Load during class initialization: accessing any member of this object triggers this first, ensuring every JNI
+    // call occurs after library loading. Even when setLogCallback in the initial UI composition executes before Service.onCreate
+    // (a cold-start race), it will not throw UnsatisfiedLinkError.
+    // Initial access points (Service construction, setLogCallback during composition, etc.) all run on the main thread: loading is
+    // a millisecond-scale dlopen operation with no material impact on the startup budget; no background warmup is performed.
+    // Catch exceptions here: escaping class initialization makes the JVM mark this class as having failed initialization, after which
+    // every access throws NoClassDefFoundError; an outer try-catch cannot recover it.
     private val libraryLoaded: Boolean = try {
         System.loadLibrary("usbipdcpp_native")
         true
@@ -31,38 +31,38 @@ object UsbIpNative {
         Log.e(TAG, "Failed to load native library", e)
         false
     } catch (e: Throwable) {
-        // 部分 ROM 的加载失败不是 UnsatisfiedLinkError（如 SecurityException）：
-        // 漏出去会让类初始化失败，之后每次访问都变成 NoClassDefFoundError
+        // Some ROMs report loading failures other than UnsatisfiedLinkError (such as SecurityException):
+        // letting them escape fails class initialization, turning every subsequent access into NoClassDefFoundError.
         Log.e(TAG, "Unexpected error loading native library", e)
         false
     }
 
-    // LibusbServer 内部没有锁，状态变量/容器并发访问会把状态搞乱，所有调用必须
-    // 串行。下面每个 suspend 方法内部都切到这个 dispatcher，调用方不必自己记得
-    // 切；需要"Kotlin 侧状态与 native 调用同临界区"的场景（UsbService 的设备表）
-    // 仍可在外面再包一层同一 dispatcher 的 withContext——嵌套多层也不会重复派发
-    // 或排队等待：withContext 发现新上下文的 interceptor 与本协程相同（按实例
-    // 相等比较）时直接把 block 内联执行，连调度队列都不进，不依赖 LimitedDispatcher
-    // 的队列行为。UsbService.serviceNativeContext 直接复用下方的 jniContext 实例：
-    // 实例相等不靠"两处都记得写上 nativeDispatcher"这种约定维持
+    // LibusbServer has no internal locks; concurrent access to state variables/containers corrupts state, so all calls must be
+    // serialized. Each suspend method below switches to this dispatcher internally; callers need not remember to
+    // switch. Cases requiring Kotlin state and native calls in the same critical section (UsbService's device table)
+    // can still wrap an outer withContext using the same dispatcher; multiple nested levels do not redispatch
+    // or queue to wait: when withContext sees that the new context's interceptor equals the current coroutine's (by instance
+    // equality), it executes the block inline without even entering the scheduling queue, independently of LimitedDispatcher's
+    // queue behavior. UsbService.serviceNativeContext directly reuses the jniContext instance below:
+    // instance equality does not rely on a convention of remembering nativeDispatcher in both places.
     private val nativeDispatcher = NativeTaskDispatcher(Dispatchers.IO.limitedParallelism(1))
 
-    // 给限流 dispatcher 包一层"任务执行期线程标记"：runOnNativeThread 的误用检查
-    //（在 native 任务内阻塞等待自己）需要知道"当前线程是否正跑在 native 任务里"，
-    // 而限流器的许可持有状态不可观测，这个标记是唯一的运行时信号。包装类保持
-    // 单实例参与协程上下文：withContext 的内联 fast path 按 interceptor 实例
-    // 相等判定，jniContext 与其复用者（UsbService.serviceNativeContext）共用
-    // 同一个包装实例，嵌套派发的内联行为不变
+    // Wrap the limited dispatcher with a thread marker active during task execution: runOnNativeThread's misuse check
+    //(blocking inside a native task while waiting for itself) needs to know whether the current thread is executing a native task;
+    // the limiter's permit ownership is not observable, so this marker is the only runtime signal. The wrapper remains
+    // a single instance in coroutine contexts: withContext's inline fast path checks interceptor instance
+    // equality; jniContext and its reusers (UsbService.serviceNativeContext) share
+    // the same wrapper instance, preserving inline behavior for nested dispatch.
     private class NativeTaskDispatcher(private val delegate: CoroutineDispatcher) : CoroutineDispatcher() {
         private val inNativeTask = ThreadLocal<Boolean>()
 
-        // 当前线程是否正在执行 native 任务：runOnNativeThread 的误用检查读它
+        // Whether the current thread is executing a native task; read by runOnNativeThread's misuse check.
         val isInNativeTask: Boolean
             get() = inNativeTask.get() == true
 
         override fun dispatch(context: CoroutineContext, block: Runnable) {
-            // 标记由任务实际执行的线程设置（dispatch 的调用线程与 worker 线程
-            // 可能不同）；remove 而非 set(false)：池线程长活，不留残值
+            // The thread actually executing the task sets the marker (the dispatch caller and worker threads
+            // may differ); use remove rather than set(false), leaving no stale value on long-lived pool threads.
             delegate.dispatch(context, Runnable {
                 inNativeTask.set(true)
                 try {
@@ -77,19 +77,19 @@ object UsbIpNative {
             delegate.isDispatchNeeded(context)
     }
 
-    // 所有 JNI 调用都在这个上下文执行：
-    // - nativeDispatcher 保证串行（LibusbServer 无锁）
-    // - NonCancellable 保证一旦开始就不会被取消：JNI 调用是原子的，被取消会
-    //   让 native 与 Kotlin 两侧状态不一致——native 已经绑定设备而调用方拿不到
-    //   结果，既没登记到设备表也没机会关掉已打开的 connection
-    // internal：UsbService.serviceNativeContext 直接复用本实例——嵌套
-    // withContext 走内联 fast path 的前提（interceptor 实例相等）由复用同一
-    // 对象保证，而不是靠各调用点自觉组合出等价上下文
+    // All JNI calls execute in this context:
+    // - nativeDispatcher ensures serialization (LibusbServer has no locks).
+    // - NonCancellable ensures execution cannot be cancelled once started: JNI calls are atomic; cancellation would
+    //     leave native and Kotlin state inconsistent: native has bound the device but the caller cannot receive
+    //     the result, neither registering it in the device table nor getting an opportunity to close the opened connection.
+    // internal: UsbService.serviceNativeContext directly reuses this instance; the prerequisite for nested
+    // withContext's inline fast path (equal interceptor instances) is guaranteed by reusing the same
+    // object, rather than relying on each call site to assemble an equivalent context.
     internal val jniContext = nativeDispatcher + NonCancellable
 
-    // ==================== JNI 实现，全部私有 ====================
-    // 库没加载成功时 JNI 调用会抛 UnsatisfiedLinkError（冷启动崩溃的根因），
-    // 守卫统一收在下面的公开方法里：分散到各调用点判断，漏一处就是崩溃
+    // ==================== JNI implementations, all private ====================
+    // If library loading failed, JNI calls throw UnsatisfiedLinkError (the root cause of cold-start crashes);
+    // centralize guards in the public methods below: distributing checks across call sites means a single omission causes a crash.
     private external fun nativeInitImpl(): Boolean
     private external fun setLogCallbackImpl(callback: LogCallback?)
     private external fun bindUsbDeviceImpl(fd: Int, vendorId: Int, productId: Int, outBusid: Array<String?>): Int
@@ -99,7 +99,7 @@ object UsbIpNative {
     private external fun stopServerImpl()
     private external fun releaseImpl()
 
-    // 错误码 - 必须与 JNI 层 usbipd_jni.cpp 中的 ErrorCode 命名空间保持一致
+    // Error codes - must match the ErrorCode namespace in the JNI layer's usbipd_jni.cpp.
     private object ErrorCode {
         const val SUCCESS = 0
         const val DEVICE_NOT_FOUND = 1
@@ -114,11 +114,11 @@ object UsbIpNative {
         const val UNKNOWN_ERROR = 99
     }
 
-    // ==================== 公开 API ====================
+    // ==================== Public API ====================
 
     /**
-     * 初始化 native 层。返回 false 表示 native 不可用（库加载或 libusb 初始化失败），
-     * 调用方必须跳过后续所有 native 操作
+     * Initialize the native layer. false means native is unavailable (library loading or libusb initialization failed),
+     * and the caller must skip all subsequent native operations.
      */
     suspend fun init(): Boolean {
         if (!libraryLoaded) return false
@@ -126,11 +126,11 @@ object UsbIpNative {
     }
 
     /**
-     * 设置日志回调，传 null 表示清除（释放 JNI 全局引用）。
-     * 由 UI 线程在组合/销毁时调用，必须同步执行（不能改成异步/suspend 派发）：
-     * onDispose 的清除若排队执行，Activity 销毁后全局引用可能来不及释放；
-     * native 侧实现同样必须保持非阻塞——这是组合路径上的同步调用，阻塞就是 ANR；
-     * 库不可用时静默忽略
+     * Set the log callback; null clears it (releasing the JNI global reference).
+     * Called by the UI thread during composition/destruction; must execute synchronously (must not become asynchronous/suspend dispatch):
+     * if clearing in onDispose were queued, the global reference might not be released in time after Activity destruction;
+     * the native implementation must also remain nonblocking: this is a synchronous composition-path call, so blocking causes ANR;
+     * silently ignored if the library is unavailable.
      */
     fun setLogCallback(callback: LogCallback?) {
         if (libraryLoaded) setLogCallbackImpl(callback)
@@ -142,22 +142,22 @@ object UsbIpNative {
             val outBusid = arrayOfNulls<String>(1)
             val code = bindUsbDeviceImpl(fd, vendorId, productId, outBusid)
             if (code == ErrorCode.SUCCESS) {
-                // JNI 层 SUCCESS 时必已写 busid，防御性检查防止未来实现改动导致 NPE
+                // JNI must have written busid on SUCCESS; this defensive check prevents NPE after future implementation changes.
                 val busid = outBusid[0]
                 if (busid != null) {
                     DeviceBindResult.Success(busid)
                 } else {
-                    // 契约违约：native 声称成功却没交出 busid——交付失败（NewStringUTF/
-                    // SetObjectArrayElement）时 native 会自行回滚并返回 UNKNOWN_ERROR，
-                    // 走的是 else 分支，能进到这里说明 native 假报了成功，不是重复解绑。
-                    // 调用方没有登记、稍后只会关连接，不主动解绑的话 native 侧留下谁也
-                    // 解不了的孤儿。走 InContext 版本而非公开方法：已持有 jniContext
-                    // 许可，再经公开方法的 withContext 会排队等待自己（不依赖内联
-                    // fast path）；库加载守卫在公开层，本调用已在外层守卫之后
+                    // Contract violation: native reports success without delivering busid. On delivery failure (NewStringUTF/
+                    // SetObjectArrayElement), native rolls back itself and returns UNKNOWN_ERROR,
+                    // taking the else branch; reaching here means native falsely reported success, rather than duplicate unbinding.
+                    // The caller has not registered the device and will only close the connection later; without explicitly unbinding, native retains an orphan
+                    // that nobody can unbind. Use the InContext version rather than the public method: the jniContext
+                    // permit is already held, and the public method's withContext would queue waiting for itself (without relying on the inline
+                    // fast path). The library-loading guard is in the public layer, and this call is already past the outer guard.
                     val rollback = unbindUsbDeviceInContext(fd)
-                    // 分两路记，避免把"没得回滚"（DeviceNotFound 等）与成功混在同一
-                    // 措辞里：回滚失败时 native 侧成孤儿且无人能解——busid 本就不可得，
-                    // 只能等 release/重启服务器整体回收
+                    // Log the two paths separately to avoid describing nothing to roll back (DeviceNotFound, etc.) with the same
+                    // wording as success: rollback failure leaves a native orphan nobody can unbind, since busid is unavailable;
+                    // only release/server restart can reclaim everything.
                     if (rollback is DeviceUnbindResult.Success) {
                         Log.e(TAG, "bind returned SUCCESS but busid is null, rolled back by fd, fd=$fd")
                     } else {
@@ -176,10 +176,10 @@ object UsbIpNative {
         return withContext(jniContext) { unbindUsbDeviceInContext(fd) }
     }
 
-    // 不带 withContext 的版本：供已持有 jniContext 许可的调用方使用（bindUsbDevice
-    // 的契约违约回滚）。在许可内再经公开方法嵌套 withContext 会排队等待自己——
-    // 这里不依赖"同 dispatcher 内联 fast path"这类实现细节。库加载守卫由公开
-    // 方法统一收口，调用方必须保证已过守卫且已在 jniContext 内
+    // Version without withContext: for callers already holding the jniContext permit (bindUsbDevice's
+    // contract-violation rollback). Nesting the public method's withContext while holding the permit would queue waiting for itself;
+    // this does not rely on implementation details such as the same-dispatcher inline fast path. Public methods centralize the
+    // library-loading guard; the caller must ensure it has passed the guard and is already inside jniContext.
     private fun unbindUsbDeviceInContext(fd: Int): DeviceUnbindResult {
         return when (val code = unbindUsbDeviceImpl(fd)) {
             ErrorCode.SUCCESS -> DeviceUnbindResult.Success
@@ -194,9 +194,9 @@ object UsbIpNative {
     }
 
     /**
-     * 通知 native 设备已消失。无结果返回：native 侧查无此 busid 属正常情形
-     *（设备已被其他路径清理）；处理失败只记 native 日志。调用方按"拔出清理
-     * 必须做完"的语义执行，不依赖此处的成败
+     * Notify native that a device has disappeared. No result is returned: a missing busid on the native side is normal
+     *(the device was cleaned up through another path); processing failures only produce native logs. The caller follows the semantics that
+     * detach cleanup must complete, independently of success or failure here.
      */
     suspend fun notifyDeviceRemoved(busid: String) {
         if (!libraryLoaded) return
@@ -204,9 +204,9 @@ object UsbIpNative {
     }
 
     /**
-     * 启动服务器。返回实际监听端口：成功启动或已在运行时都是当前真实端口
-     *（已在运行时可能是先前启动的原端口，不是本次入参），失败返回 -1——
-     * 调用方回填 state 的 port 必须用它，不能用入参推断
+     * Start the server. Return the actual listening port: the current real port after successful startup or if already running
+     *(if already running, this may be the port from an earlier startup, rather than this input); return -1 on failure.
+     * The caller must use this result to fill in state's port, rather than infer it from the input.
      */
     suspend fun startServer(port: Int): Int {
         if (!libraryLoaded) return -1
@@ -224,38 +224,38 @@ object UsbIpNative {
     }
 
     /**
-     * 在 native 线程同步执行代码块，供 Service 销毁等非协程场景使用。
-     * 注意：runBlocking 会阻塞当前线程——禁止在主线程调用（会 ANR）；
-     * 也禁止在 native 上下文（nativeDispatcher/jniContext 的任务）内调用：
-     * 当前线程若正持有该限流 dispatcher 的唯一许可，阻塞等待自己的许可会自死锁
-     *（与 withContext 的内联 fast path 不同，那是同协程切换，这里是阻塞整个线程）。
-     * 现有唯一调用点是 onDestroy 的专用清理线程（裸线程，不持有许可）。
-     * 两种误用都能在运行时拦下：主线程检查 + native 任务内线程标记（见
-     * nativeDispatcher 声明处的包装层）。
-     * internal：仅供本应用模块内的服务层使用，不作为公开 API
+     * Execute a block synchronously on the native thread, for non-coroutine cases such as Service destruction.
+     * Note: runBlocking blocks the current thread; calling it on the main thread is forbidden (causes ANR);
+     * calling it inside the native context (nativeDispatcher/jniContext tasks) is also forbidden:
+     * if the current thread holds this limited dispatcher's sole permit, blocking to wait for its own permit causes self-deadlock
+     *(unlike withContext's inline fast path, which switches within the same coroutine; here the entire thread is blocked).
+     * The only current call site is onDestroy's dedicated cleanup thread (a plain thread holding no permit).
+     * Both misuses are caught at runtime: main-thread check plus the thread marker inside native tasks (see
+     * the wrapper at nativeDispatcher's declaration).
+     * internal: for this application's service layer only, not a public API.
      */
     @WorkerThread
     internal fun runOnNativeThread(block: suspend () -> Unit) {
-        // 防误用断言（全构建生效）：主线程调用会让 runBlocking 卡到 native 完成，
-        // 断言让它立刻失败而非静默卡顿到 ANR
+        // Misuse assertion (active in all builds): a main-thread call would block runBlocking until native finishes;
+        // the assertion fails immediately instead of silently stalling until ANR.
         check(Looper.myLooper() != Looper.getMainLooper()) { "runOnNativeThread must not be called on the main thread" }
-        // 同线程已在 native 任务内时（持有唯一许可）：runBlocking 阻塞本线程、
-        // 再取许可必然排队等待自己（静默死锁，无日志难排查），入口处直接失败
+        // When the same thread is already inside a native task (holding the sole permit), runBlocking blocks it,
+        // and acquiring the permit again necessarily queues waiting for itself (silent deadlock, hard to diagnose without logs); fail at entry.
         check(!nativeDispatcher.isInNativeTask) { "runOnNativeThread must not be called from inside a native task" }
         runBlocking {
-            // 用 jniContext 而非裸 dispatcher：与其余 JNI 调用同一纪律
-            //（串行 + 不可取消），换调用场景时不会踩"被取消留下半截状态"的坑
+            // Use jniContext rather than the bare dispatcher: follow the same discipline as other JNI calls
+            //(serialized and non-cancellable), avoiding cancellation leaving partially completed state when the calling context changes.
             withContext(jniContext) {
                 block()
             }
         }
     }
 
-    // JNI 错误码 → 失败结果：映射只有这一处，加错误码时不会漏改调用方
+    // JNI error code -> failure result: this is the sole mapping, so adding error codes does not miss updates at call sites.
     private fun errorCodeToBindFailure(code: Int): DeviceBindResult.Failure = when (code) {
         ErrorCode.DEVICE_NOT_FOUND -> DeviceBindResult.Failure.DeviceNotFound
         ErrorCode.DEVICE_IN_USE -> DeviceBindResult.Failure.DeviceInUse
-        // 同 busid 已绑定同样表示"用不了"，复用同一提示
+        // An already-bound busid also means unavailable; reuse the same message.
         ErrorCode.DEVICE_ALREADY_BOUND -> DeviceBindResult.Failure.DeviceInUse
         ErrorCode.DEVICE_OPEN_FAILED -> DeviceBindResult.Failure.DeviceOpenFailed
         ErrorCode.GET_DESCRIPTOR_FAILED -> DeviceBindResult.Failure.GetDescriptorFailed

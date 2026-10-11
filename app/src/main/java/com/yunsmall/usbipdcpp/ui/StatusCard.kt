@@ -31,8 +31,8 @@ fun StatusCard(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                // 复制菜单的三项都依赖 IP：无 IP（如纯 USB 共享网络）时不可点，
-                // 否则弹出的是空菜单
+                // All three copy-menu entries depend on IP: disable without an IP (such as pure USB network sharing),
+                // otherwise an empty menu would appear.
                 .clickable(enabled = serverRunning && ipAddress != null) { showCopyMenu = true },
             colors = CardDefaults.cardColors(
                 containerColor = if (serverRunning)

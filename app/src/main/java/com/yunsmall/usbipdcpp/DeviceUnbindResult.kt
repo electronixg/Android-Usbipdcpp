@@ -3,10 +3,10 @@ package com.yunsmall.usbipdcpp
 import android.content.Context
 
 /**
- * 设备解绑操作结果
+ * Device unbinding operation result
  */
 sealed class DeviceUnbindResult {
-    // 解绑成功无负载（object）；绑定成功要携带 busid，见 DeviceBindResult
+    // Successful unbinding has no payload (object); successful binding carries busid, see DeviceBindResult.
     object Success : DeviceUnbindResult()
 
     sealed class Failure : DeviceUnbindResult() {

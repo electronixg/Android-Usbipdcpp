@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 匹配所有USB设备 -->
+    <!-- Match all USB devices -->
     <usb-device />
 </resources>

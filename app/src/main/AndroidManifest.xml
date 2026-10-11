@@ -2,14 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- USB权限 -->
+    <!-- USB permission -->
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
-    <!-- 摄像头权限（尝试获取 UVC 设备访问） -->
+    <!-- Camera permission (attempt to obtain access to UVC devices) -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-    <!-- 网络权限 -->
+    <!-- Network permission -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -25,10 +25,10 @@
         android:supportsRtl="true"
         android:localeConfig="@xml/locales_config"
         android:theme="@style/Theme.Usbipdcpp">
-        <!-- singleTask：USB 权限对话框点"允许"后，系统会向声明了 device_filter 的
-             本 Activity 投递 USB_DEVICE_ATTACHED intent；standard 模式会新建实例
-             压栈（观感像 Activity 重建、返回键要按两次），singleTask 让 intent 送到
-             既有实例（onNewIntent），全 app 保持单实例 -->
+        <!-- singleTask: after "Allow" is tapped in the USB permission dialog, the system delivers a USB_DEVICE_ATTACHED intent to
+             this Activity, which declares device_filter; standard mode would create a new instance
+             on the stack (appearing like Activity recreation and requiring two Back presses); singleTask delivers the intent to
+             the existing instance (onNewIntent), keeping a single instance throughout the app -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -42,7 +42,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- USB设备附加意图 -->
+            <!-- USB device attachment intent -->
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
@@ -60,7 +60,7 @@
                 android:value="usbip_server" />
         </service>
 
-        <!-- 自动存储语言设置 -->
+        <!-- Automatically store language settings -->
         <service
             android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
             android:enabled="false"

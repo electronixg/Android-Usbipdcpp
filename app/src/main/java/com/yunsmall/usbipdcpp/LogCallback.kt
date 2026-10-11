@@ -3,8 +3,8 @@ package com.yunsmall.usbipdcpp
 import androidx.annotation.IntDef
 
 /**
- * spdlog 级别常量：数值与 native 侧 spdlog::level::level_enum 严格一致，
- * 供 onLog 实现做过滤/着色时取值，不用在 UI 侧重抄一遍数字
+ * spdlog level constants: values exactly match native spdlog::level::level_enum,
+ * for onLog implementations to filter/color logs without copying the numbers again in the UI.
  */
 object SpdLogLevels {
     const val TRACE = 0
@@ -16,7 +16,7 @@ object SpdLogLevels {
     const val OFF = 6
 }
 
-// SOURCE 保留：只用于编码期的类型提示（lint/IDE），不进入运行时产物
+// SOURCE retention: only for coding-time type hints (lint/IDE), excluded from runtime artifacts.
 @IntDef(
     SpdLogLevels.TRACE, SpdLogLevels.DEBUG, SpdLogLevels.INFO, SpdLogLevels.WARN,
     SpdLogLevels.ERROR, SpdLogLevels.CRITICAL, SpdLogLevels.OFF
@@ -25,17 +25,17 @@ object SpdLogLevels {
 annotation class SpdLogLevel
 
 /**
- * native 日志回调。onLog 由 native 日志线程同步调用，该线程要等它返回才继续处理
- * 后续日志：实现必须立即返回，重活自行切线程，否则会拖慢整条 native 日志通路。
- * 严禁在 onLog 内调用 UsbIpNative 的任何方法：日志可能发自持有 native 内部锁的
- * 调用链（如 g_server_mutex 内的 spdlog 输出），重入 native 会死锁
+ * Native log callback. onLog is called synchronously by the native logging thread, which must wait for it to return before processing
+ * subsequent logs: implementations must return immediately and move heavy work to another thread, otherwise the entire native logging path slows down.
+ * Never call any UsbIpNative method inside onLog: logs may originate from a call chain holding native internal locks
+ * (such as spdlog output under g_server_mutex), so reentering native would deadlock.
  */
 interface LogCallback {
     /**
-     * @param level spdlog 级别（spdlog::level::level_enum 的整数值：0=trace … 5=critical；
-     *        取值常量见 SpdLogLevels）。当前 UI 未区分级别，保留参数以对应 spdlog
-     *        原始形态，将来做过滤/着色不必改 JNI
-     * @param message 已按 pattern 格式化好的日志文本
+     * @param level spdlog level (integer value of spdlog::level::level_enum: 0=trace ... 5=critical;
+     *               see SpdLogLevels for constants). The current UI does not distinguish levels; retain the parameter to match spdlog's
+     *               original form so future filtering/coloring does not require JNI changes.
+     * @param message Log text already formatted according to the pattern.
      */
     fun onLog(@SpdLogLevel level: Int, message: String)
 }

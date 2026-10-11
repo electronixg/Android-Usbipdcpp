@@ -18,7 +18,7 @@ import com.yunsmall.usbipdcpp.R
 @Composable
 fun ColumnScope.DeviceListSection(
     devices: Map<String, UsbDevice>,
-    // deviceName -> busid：判绑定与取 busid 用同一份数据，不拆两条参数线
+    // deviceName -> busid: use the same data to check binding and retrieve busid, rather than separate parameter paths.
     boundDevices: Map<String, String>,
     busyDevices: Set<String>,
     serverRunning: Boolean,
@@ -29,13 +29,13 @@ fun ColumnScope.DeviceListSection(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            // fill = false：设备少时卡片按内容收高，富余空间让给日志区
-            //（LogSection 的 weight 用默认 fill = true，接收剩余空间）
+            // fill = false: with few devices, size the card to its content and leave spare space for the log area
+            //(LogSection's weight uses the default fill = true to receive the remaining space).
             .weight(1.5f, fill = false)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            // entries 列表按 devices 缓存：重组（如 busyDevices 进度动画驱动的帧）
-            // 不重造；放条件外与 LogSection 的 scrollState 同理，分支切换不丢缓存
+            // Cache entries by devices: recomposition (such as frames driven by busyDevices progress animations)
+            // does not rebuild them. Keep this outside the condition, like LogSection's scrollState, so branch switching preserves the cache.
             val deviceEntries = remember(devices) { devices.entries.toList() }
             Row(
                 modifier = Modifier.fillMaxWidth(),
