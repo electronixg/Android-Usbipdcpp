@@ -65,6 +65,9 @@ class UsbService : Service() {
     sealed interface Event {
         /** Device was detached; wasBound indicates whether it was bound before detachment, so the UI can decide whether to notify. */
         data class DeviceDetached(val device: UsbDevice, val wasBound: Boolean) : Event
+
+        /** Diagnostic text intended to be shown in the app's on-screen Log panel. */
+        data class Diagnostic(val message: String) : Event
     }
 
     private val _state = MutableStateFlow(UiState())
@@ -126,16 +129,17 @@ class UsbService : Service() {
                 intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             }
             device?.let { usbDevice ->
-                Log.e(
-                    TAG,
+                val detachDiagnostic =
                     "USB DETACH BROADCAST: " +
                         "name=${usbDevice.deviceName}, " +
                         "vid=${String.format("%04X", usbDevice.vendorId)}, " +
                         "pid=${String.format("%04X", usbDevice.productId)}, " +
                         "deviceId=${usbDevice.deviceId}, " +
                         "interfaces=${usbDevice.interfaceCount}, " +
-                        "bound=${activeDevices.containsKey(usbDevice.deviceName)}"
-                )
+                        "bound=${state.value.boundDevices.containsKey(usbDevice.deviceName)}"
+
+                Log.e(TAG, detachDiagnostic)
+                _events.tryEmit(Event.Diagnostic(detachDiagnostic))
                 // onReceive runs on the main thread; switch device cleanup to the native thread.
                 // Launch a coroutine rather than using runBlocking so the main thread is not blocked.
                 serviceScope.launch { handleDeviceDetached(usbDevice) }
@@ -322,39 +326,37 @@ class UsbService : Service() {
                 return@withContext DeviceBindResult.Failure.DeviceInUse
             }
 
-            Log.e(
-                TAG,
-                buildString {
-                    appendLine("=== USB DEVICE BEFORE BIND ===")
-                    appendLine("name=${device.deviceName}")
-                    appendLine("vid=${String.format("%04X", device.vendorId)}")
-                    appendLine("pid=${String.format("%04X", device.productId)}")
-                    appendLine("deviceId=${device.deviceId}")
-                    appendLine("class=${device.deviceClass}")
-                    appendLine("subclass=${device.deviceSubclass}")
-                    appendLine("protocol=${device.deviceProtocol}")
-                    appendLine("interfaces=${device.interfaceCount}")
+            val bindDiagnostic = buildString {
+                appendLine("=== USB DEVICE BEFORE BIND ===")
+                appendLine("name=${device.deviceName}")
+                appendLine("vid=${String.format("%04X", device.vendorId)}")
+                appendLine("pid=${String.format("%04X", device.productId)}")
+                appendLine("deviceId=${device.deviceId}")
+                appendLine("class=${device.deviceClass}")
+                appendLine("subclass=${device.deviceSubclass}")
+                appendLine("protocol=${device.deviceProtocol}")
+                appendLine("interfaces=${device.interfaceCount}")
 
-                    for (i in 0 until device.interfaceCount) {
-                        val intf = device.getInterface(i)
+                for (i in 0 until device.interfaceCount) {
+                    val intf = device.getInterface(i)
+                    appendLine(
+                        "IF[$i]: id=${intf.id}, class=${intf.interfaceClass}, " +
+                            "subclass=${intf.interfaceSubclass}, protocol=${intf.interfaceProtocol}, " +
+                            "endpoints=${intf.endpointCount}"
+                    )
+                    for (e in 0 until intf.endpointCount) {
+                        val ep = intf.getEndpoint(e)
                         appendLine(
-                            "IF[$i]: id=${intf.id}, class=${intf.interfaceClass}, " +
-                                "subclass=${intf.interfaceSubclass}, protocol=${intf.interfaceProtocol}, " +
-                                "endpoints=${intf.endpointCount}"
+                            "  EP[$e]: address=0x${ep.address.toString(16)}, " +
+                                "type=${ep.type}, direction=${ep.direction}, " +
+                                "maxPacket=${ep.maxPacketSize}, interval=${ep.interval}"
                         )
-
-                        for (e in 0 until intf.endpointCount) {
-                            val ep = intf.getEndpoint(e)
-                            appendLine(
-                                "  EP[$e]: address=0x${ep.address.toString(16)}, " +
-                                    "type=${ep.type}, direction=${ep.direction}, " +
-                                    "maxPacket=${ep.maxPacketSize}, interval=${ep.interval}"
-                            )
-                        }
                     }
-                    append("=== END USB DEVICE ===")
                 }
-            )
+                append("=== END USB DEVICE ===")
+            }
+            Log.e(TAG, bindDiagnostic)
+            _events.tryEmit(Event.Diagnostic(bindDiagnostic))
 
             val connection = usbManager.openDevice(device)
             if (connection == null) {
